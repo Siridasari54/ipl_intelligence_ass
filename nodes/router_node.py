@@ -17,6 +17,8 @@ def router_node(state: Dict[str, Any]) -> Dict[str, Any]:
     - Bowling queries
     - Venue queries
     - Records queries
+    - Head-to-head (h2h) queries
+    - Form queries
     - General IPL queries
     """
     question = state["question"]
@@ -33,12 +35,14 @@ def router_node(state: Dict[str, Any]) -> Dict[str, Any]:
         """You are a query classifier for IPL (Indian Premier League) cricket information.
         Classify the user's question into one of these categories:
         
-        1. team - Questions about IPL teams, franchises, squad, owners, etc.
-        2. batting - Questions about batting statistics, runs, centuries, batting averages, etc.
+        1. team - Questions about IPL teams, franchises, squad, owners, team composition, etc.
+        2. batting - Questions about batting statistics, runs, centuries, batting averages, strike rates, etc.
         3. bowling - Questions about bowling statistics, wickets, economy rates, bowling averages, etc.
-        4. venue - Questions about stadiums, venues, locations, grounds, etc.
-        5. records - Questions about records, milestones, achievements, history, etc.
-        6. general - General IPL questions that don't fit other categories
+        4. venue - Questions about stadiums, venues, locations, grounds, pitch conditions, etc.
+        5. records - Questions about records, milestones, achievements, history, highest scores, etc.
+        6. h2h - Questions about head-to-head matchups between teams, historical matchups, team vs team performance, etc.
+        7. form - Questions about recent form, current performance trends, recent matches, current season performance, etc.
+        8. general - General IPL questions that don't fit other categories
         
         Return ONLY the category name (lowercase, single word).
         
@@ -53,7 +57,7 @@ def router_node(state: Dict[str, Any]) -> Dict[str, Any]:
     query_type = response.content.strip().lower()
     
     # Validate query type
-    valid_types = ["team", "batting", "bowling", "venue", "records", "general"]
+    valid_types = ["team", "batting", "bowling", "venue", "records", "h2h", "form", "general"]
     if query_type not in valid_types:
         query_type = "general"  # Default to general if classification fails
     
