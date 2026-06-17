@@ -13,10 +13,24 @@ def generation_node(state: Dict[str, Any]) -> Dict[str, Any]:
     Generation node to create answer from retrieved context.
     
     Generates answers strictly from retrieved context with source citations.
+    If validation failed or confidence is low, returns the pre-generated message.
     """
     question = state["question"]
     query_type = state["query_type"]
     documents: List[Document] = state["documents"]
+    validation_status = state.get("validation_status", "")
+    confidence_level = state.get("confidence_level", "")
+    
+    # If validation failed or confidence is low, return the pre-generated message
+    if validation_status == "failed" or confidence_level == "low":
+        generation = state.get("generation", "I don't have enough information from the indexed IPL dataset to answer this question.")
+        return {
+            "question": question,
+            "query_type": query_type,
+            "documents": documents,
+            "generation": generation,
+            "sources": []
+        }
     
     # Initialize LLM
     llm = ChatGroq(
