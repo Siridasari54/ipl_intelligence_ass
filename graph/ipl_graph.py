@@ -2,7 +2,8 @@ from typing import TypedDict, List, Annotated
 from langchain_core.documents import Document
 from langgraph.graph import StateGraph, END
 from nodes.router_node import router_node
-from nodes.retrieval_node import retrieval_node
+from nodes.query_rewrite_node import query_rewrite_node
+from nodes.query_decomposition_node import query_decomposition_node
 from nodes.generation_node import generation_node
 from nodes.validation_node import validation_node
 from nodes.reranking_node import reranking_node
@@ -23,6 +24,8 @@ from retriever.base_retriever import BaseRetriever
 class GraphState(TypedDict):
     """Shared state object for the IPL RAG graph"""
     question: str
+    rewritten_query: str
+    sub_queries: List[str]
     query_type: str
     documents: List[Document]
     retrieval_scores: List[float]
@@ -31,6 +34,7 @@ class GraphState(TypedDict):
     validation_status: str
     generation: str
     sources: List[str]
+    use_parallel: bool
 
 
 class IPLRAGGraph:
@@ -43,10 +47,16 @@ class IPLRAGGraph:
     def route_query(self, state: GraphState) -> str:
         """
         Route the query to the appropriate specialist retrieval node based on query_type.
+        Also determines if parallel execution is needed for complex queries.
         
         Returns the name of the specialist retrieval node to use.
         """
         query_type = state["query_type"]
+        question = state["question"].lower()
+        
+        # Detect if parallel execution is needed (Dream11/prediction queries)
+        parallel_keywords = ["dream11", "prediction", "predict", "best xi", "fantasy", "team combination", "compare"]
+        use_parallel = any(keyword in question for keyword in parallel_keywords)
         
         # Map query types to specialist retrieval nodes
         routing_map = {
@@ -60,7 +70,58 @@ class IPLRAGGraph:
             "general": "general_retrieval"
         }
         
+        if use_parallel:
+            return "parallel_retrieval"
+        
         return routing_map.get(query_type, "general_retrieval")
+    
+    def parallel_retrieval_node(self, state: GraphState) -> Dict[str, Any]:
+        """
+        Execute multiple specialist retrieval nodes in parallel for complex queries.
+        Merges all outputs into a single context.
+        """
+        sub_queries = state.get("sub_queries", [state["rewritten_query"]])
+        all_documents = []
+        all_scores = []
+        
+        # Map sub-queries to appropriate specialist nodes
+        specialist_nodes = {
+            "team": team_retrieval_node,
+            "batting": batting_retrieval_node,
+            "bowling": bowling_retrieval_node,
+            "venue": venue_retrieval_node,
+            "records": records_retrieval_node,
+            "h2h": h2h_retrieval_node,
+            "form": form_retrieval_node,
+            "general": general_retrieval_node
+        }
+        
+        # Execute retrieval for each sub-query
+        for sub_query in sub_queries:
+            # Determine query type for this sub-query
+            temp_state = state.copy()
+            temp_state["question"] = sub_query
+            
+            # Use router to determine query type
+            from nodes.router_node import router_node
+            routed = router_node(temp_state)
+            query_type = routed["query_type"]
+            
+            # Execute appropriate specialist node
+            if query_type in specialist_nodes:
+                result = specialist_nodes[query_type](temp_state, self.retriever)
+                all_documents.extend(result["documents"])
+                all_scores.extend(result["retrieval_scores"])
+        
+        return {
+            "question": state["question"],
+            "rewritten_query": state["rewritten_query"],
+            "sub_queries": sub_queries,
+            "query_type": state["query_type"],
+            "documents": all_documents,
+            "retrieval_scores": all_scores,
+            "use_parallel": True
+        }
     
     def route_validation(self, state: GraphState) -> str:
         """
@@ -94,6 +155,8 @@ class IPLRAGGraph:
         
         # Add nodes
         workflow.add_node("router", router_node)
+        workflow.add_node("query_rewrite", query_rewrite_node)
+        workflow.add_node("query_decomposition", query_decomposition_node)
         
         # Add specialist retrieval nodes
         workflow.add_node("team_retrieval", lambda state: team_retrieval_node(state, self.retriever))
@@ -104,6 +167,9 @@ class IPLRAGGraph:
         workflow.add_node("h2h_retrieval", lambda state: h2h_retrieval_node(state, self.retriever))
         workflow.add_node("form_retrieval", lambda state: form_retrieval_node(state, self.retriever))
         workflow.add_node("general_retrieval", lambda state: general_retrieval_node(state, self.retriever))
+        
+        # Add parallel retrieval node
+        workflow.add_node("parallel_retrieval", self.parallel_retrieval_node)
         
         # Add reranking node
         workflow.add_node("reranking", reranking_node)
@@ -120,9 +186,15 @@ class IPLRAGGraph:
         # Set entry point
         workflow.set_entry_point("router")
         
-        # Add conditional edges from router to specialist retrieval nodes
+        # Add edge from router to query rewrite
+        workflow.add_edge("router", "query_rewrite")
+        
+        # Add edge from query rewrite to query decomposition
+        workflow.add_edge("query_rewrite", "query_decomposition")
+        
+        # Add conditional edges from query decomposition to retrieval nodes
         workflow.add_conditional_edges(
-            "router",
+            "query_decomposition",
             self.route_query,
             {
                 "team_retrieval": "team_retrieval",
@@ -132,7 +204,8 @@ class IPLRAGGraph:
                 "records_retrieval": "records_retrieval",
                 "h2h_retrieval": "h2h_retrieval",
                 "form_retrieval": "form_retrieval",
-                "general_retrieval": "general_retrieval"
+                "general_retrieval": "general_retrieval",
+                "parallel_retrieval": "parallel_retrieval"
             }
         )
         
@@ -145,6 +218,7 @@ class IPLRAGGraph:
         workflow.add_edge("h2h_retrieval", "reranking")
         workflow.add_edge("form_retrieval", "reranking")
         workflow.add_edge("general_retrieval", "reranking")
+        workflow.add_edge("parallel_retrieval", "reranking")
         
         # Add edge from reranking to validation
         workflow.add_edge("reranking", "validation")
@@ -178,6 +252,8 @@ class IPLRAGGraph:
         """Run the RAG graph with a question"""
         inputs = {
             "question": question,
+            "rewritten_query": "",
+            "sub_queries": [],
             "query_type": "",
             "documents": [],
             "retrieval_scores": [],
@@ -185,7 +261,8 @@ class IPLRAGGraph:
             "confidence_level": "",
             "validation_status": "",
             "generation": "",
-            "sources": []
+            "sources": [],
+            "use_parallel": False
         }
         result = self.graph.invoke(inputs)
         return result
@@ -195,6 +272,8 @@ class IPLRAGGraph:
         return {
             "nodes": [
                 "router",
+                "query_rewrite",
+                "query_decomposition",
                 "team_retrieval",
                 "batting_retrieval",
                 "bowling_retrieval",
@@ -203,20 +282,24 @@ class IPLRAGGraph:
                 "h2h_retrieval",
                 "form_retrieval",
                 "general_retrieval",
+                "parallel_retrieval",
                 "reranking",
                 "validation",
                 "confidence",
                 "generation"
             ],
             "edges": [
-                ("router", "team_retrieval"),
-                ("router", "batting_retrieval"),
-                ("router", "bowling_retrieval"),
-                ("router", "venue_retrieval"),
-                ("router", "records_retrieval"),
-                ("router", "h2h_retrieval"),
-                ("router", "form_retrieval"),
-                ("router", "general_retrieval"),
+                ("router", "query_rewrite"),
+                ("query_rewrite", "query_decomposition"),
+                ("query_decomposition", "team_retrieval"),
+                ("query_decomposition", "batting_retrieval"),
+                ("query_decomposition", "bowling_retrieval"),
+                ("query_decomposition", "venue_retrieval"),
+                ("query_decomposition", "records_retrieval"),
+                ("query_decomposition", "h2h_retrieval"),
+                ("query_decomposition", "form_retrieval"),
+                ("query_decomposition", "general_retrieval"),
+                ("query_decomposition", "parallel_retrieval"),
                 ("team_retrieval", "reranking"),
                 ("batting_retrieval", "reranking"),
                 ("bowling_retrieval", "reranking"),
@@ -225,6 +308,7 @@ class IPLRAGGraph:
                 ("h2h_retrieval", "reranking"),
                 ("form_retrieval", "reranking"),
                 ("general_retrieval", "reranking"),
+                ("parallel_retrieval", "reranking"),
                 ("reranking", "validation"),
                 ("validation", "confidence"),
                 ("validation", "END"),
@@ -232,5 +316,5 @@ class IPLRAGGraph:
                 ("confidence", "END"),
                 ("generation", "END")
             ],
-            "workflow": "Router → Conditional Routing → Specialist Retrieval → Reranking → Validation → Confidence Assessment → Generation → END"
+            "workflow": "Router → QueryRewrite → QueryDecomposition → Parallel Specialist Retrieval Nodes → Rerank → Validation → Confidence → Generation → END"
         }
