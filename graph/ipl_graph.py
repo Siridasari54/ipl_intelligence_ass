@@ -8,6 +8,8 @@ from nodes.generation_node import generation_node
 from nodes.validation_node import validation_node
 from nodes.reranking_node import reranking_node
 from nodes.confidence_node import confidence_node
+from nodes.grounding_guard_node import grounding_guard_node
+from nodes.fallback_handler_node import fallback_handler_node
 from nodes.specialist_retrieval_nodes import (
     team_retrieval_node,
     batting_retrieval_node,
@@ -35,6 +37,13 @@ class GraphState(TypedDict):
     generation: str
     sources: List[str]
     use_parallel: bool
+    conflict_detected: bool
+    conflicts: List[Dict[str, Any]]
+    conflict_explanation: str
+    grounding_status: str
+    grounding_message: str
+    fallback_triggered: bool
+    fallback_reason: str
 
 
 class IPLRAGGraph:
@@ -127,25 +136,51 @@ class IPLRAGGraph:
         """
         Route based on validation status.
         
-        If validation passed, proceed to confidence assessment.
-        If validation failed, end the workflow.
+        If validation passed, proceed to grounding guard.
+        If validation failed, proceed to fallback handler.
         """
         validation_status = state.get("validation_status", "")
         
         if validation_status == "failed":
-            return END
-        return "confidence"
+            return "fallback_handler"
+        return "grounding_guard"
     
     def route_confidence(self, state: GraphState) -> str:
         """
         Route based on confidence level.
         
-        If confidence is low, end the workflow (answer already generated).
+        If confidence is low, proceed to fallback handler.
         If confidence is medium or high, proceed to generation.
         """
         confidence_level = state.get("confidence_level", "")
         
         if confidence_level == "low":
+            return "fallback_handler"
+        return "generation"
+    
+    def route_grounding(self, state: GraphState) -> str:
+        """
+        Route based on grounding status.
+        
+        If grounding failed, proceed to fallback handler.
+        If grounding passed, proceed to confidence assessment.
+        """
+        grounding_status = state.get("grounding_status", "")
+        
+        if grounding_status == "failed":
+            return "fallback_handler"
+        return "confidence"
+    
+    def route_fallback(self, state: GraphState) -> str:
+        """
+        Route based on fallback trigger status.
+        
+        If fallback was triggered, end the workflow.
+        If fallback was not triggered, proceed to generation.
+        """
+        fallback_triggered = state.get("fallback_triggered", False)
+        
+        if fallback_triggered:
             return END
         return "generation"
     
@@ -176,6 +211,12 @@ class IPLRAGGraph:
         
         # Add validation node
         workflow.add_node("validation", validation_node)
+        
+        # Add grounding guard node
+        workflow.add_node("grounding_guard", grounding_guard_node)
+        
+        # Add fallback handler node
+        workflow.add_node("fallback_handler", fallback_handler_node)
         
         # Add confidence assessment node
         workflow.add_node("confidence", confidence_node)
@@ -223,20 +264,40 @@ class IPLRAGGraph:
         # Add edge from reranking to validation
         workflow.add_edge("reranking", "validation")
         
-        # Add conditional edges from validation to confidence assessment or END
+        # Add conditional edges from validation to grounding guard or fallback handler
         workflow.add_conditional_edges(
             "validation",
             self.route_validation,
             {
-                "confidence": "confidence",
-                END: END
+                "grounding_guard": "grounding_guard",
+                "fallback_handler": "fallback_handler"
             }
         )
         
-        # Add conditional edges from confidence to generation or END
+        # Add conditional edges from grounding guard to confidence or fallback handler
+        workflow.add_conditional_edges(
+            "grounding_guard",
+            self.route_grounding,
+            {
+                "confidence": "confidence",
+                "fallback_handler": "fallback_handler"
+            }
+        )
+        
+        # Add conditional edges from confidence to generation or fallback handler
         workflow.add_conditional_edges(
             "confidence",
             self.route_confidence,
+            {
+                "generation": "generation",
+                "fallback_handler": "fallback_handler"
+            }
+        )
+        
+        # Add conditional edges from fallback handler to generation or END
+        workflow.add_conditional_edges(
+            "fallback_handler",
+            self.route_fallback,
             {
                 "generation": "generation",
                 END: END
@@ -262,7 +323,14 @@ class IPLRAGGraph:
             "validation_status": "",
             "generation": "",
             "sources": [],
-            "use_parallel": False
+            "use_parallel": False,
+            "conflict_detected": False,
+            "conflicts": [],
+            "conflict_explanation": "",
+            "grounding_status": "",
+            "grounding_message": "",
+            "fallback_triggered": False,
+            "fallback_reason": ""
         }
         result = self.graph.invoke(inputs)
         return result
@@ -285,6 +353,8 @@ class IPLRAGGraph:
                 "parallel_retrieval",
                 "reranking",
                 "validation",
+                "grounding_guard",
+                "fallback_handler",
                 "confidence",
                 "generation"
             ],
@@ -310,11 +380,15 @@ class IPLRAGGraph:
                 ("general_retrieval", "reranking"),
                 ("parallel_retrieval", "reranking"),
                 ("reranking", "validation"),
-                ("validation", "confidence"),
-                ("validation", "END"),
+                ("validation", "grounding_guard"),
+                ("validation", "fallback_handler"),
+                ("grounding_guard", "confidence"),
+                ("grounding_guard", "fallback_handler"),
                 ("confidence", "generation"),
-                ("confidence", "END"),
+                ("confidence", "fallback_handler"),
+                ("fallback_handler", "generation"),
+                ("fallback_handler", "END"),
                 ("generation", "END")
             ],
-            "workflow": "Router → QueryRewrite → QueryDecomposition → Parallel Specialist Retrieval Nodes → Rerank → Validation → Confidence → Generation → END"
+            "workflow": "Router → QueryRewrite → QueryDecomposition → Parallel Specialist Retrieval Nodes → Rerank → Validation → Grounding Guard → Fallback (if needed) → Generation → END"
         }
