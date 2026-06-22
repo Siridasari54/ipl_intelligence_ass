@@ -40,14 +40,20 @@ def main():
         - **Bowling**: Bowling statistics
         - **Venue**: Stadium/venue info
         - **Records**: Records & milestones
+        - **H2H**: Head-to-head matchups
+        - **Form**: Recent form & performance
         - **General**: General IPL queries
         """)
         
         st.subheader("Graph Workflow")
         st.markdown("""
         1. **Router** - Classify query type
-        2. **Retrieval** - Fetch relevant chunks
-        3. **Generation** - Generate answer
+        2. **Conditional Routing** - Route to specialist
+        3. **Specialist Retrieval** - Metadata filtering + Hybrid retrieval (Chroma + BM25)
+        4. **Reranking** - Cross-encoder reranking
+        5. **Validation** - Check context sufficiency
+        6. **Confidence Assessment** - Assess confidence level
+        7. **Generation** - Generate answer
         """)
     
     # Initialize components
@@ -82,12 +88,22 @@ def main():
             if "query_type" in message:
                 st.caption(f"📌 Query Type: {message['query_type'].upper()}")
             
+            if "confidence_level" in message and message["confidence_level"]:
+                confidence = message["confidence_level"].upper()
+                emoji = "🟢" if confidence == "HIGH" else "🟡" if confidence == "MEDIUM" else "🔴"
+                st.caption(f"{emoji} Confidence: {confidence}")
+            
             if "retrieved_chunks" in message and message["retrieved_chunks"]:
                 with st.expander("📄 Retrieved Context"):
                     for i, chunk in enumerate(message["retrieved_chunks"], 1):
                         st.markdown(f"**Chunk {i}:**")
                         st.text(chunk)
-                        st.caption(f"Score: {message['scores'][i-1]:.4f}")
+                        if i <= len(message.get("scores", [])):
+                            st.caption(f"Semantic Score: {message['scores'][i-1]:.4f}")
+                        if i <= len(message.get("rerank_scores", [])):
+                            st.caption(f"Rerank Score: {message['rerank_scores'][i-1]:.4f}")
+                        if "metadata_sections" in message and i <= len(message["metadata_sections"]):
+                            st.caption(f"Metadata Section: {message['metadata_sections'][i-1]}")
             
             if "sources" in message and message["sources"]:
                 st.caption(f"📚 Sources: {', '.join(message['sources'])}")
@@ -114,9 +130,17 @@ def main():
                     query_type = result.get("query_type", "general")
                     st.caption(f"📌 Query Type: {query_type.upper()}")
                     
+                    # Display confidence level
+                    confidence_level = result.get("confidence_level", "")
+                    if confidence_level:
+                        confidence = confidence_level.upper()
+                        emoji = "🟢" if confidence == "HIGH" else "🟡" if confidence == "MEDIUM" else "🔴"
+                        st.caption(f"{emoji} Confidence: {confidence}")
+                    
                     # Display retrieved context
                     documents = result.get("documents", [])
                     scores = result.get("retrieval_scores", [])
+                    rerank_scores = result.get("rerank_scores", [])
                     
                     if documents:
                         with st.expander("📄 Retrieved Context"):
@@ -124,7 +148,11 @@ def main():
                                 st.markdown(f"**Chunk {i}:**")
                                 st.text(doc.page_content)
                                 if i <= len(scores):
-                                    st.caption(f"Score: {scores[i-1]:.4f}")
+                                    st.caption(f"Semantic Score: {scores[i-1]:.4f}")
+                                if i <= len(rerank_scores):
+                                    st.caption(f"Rerank Score: {rerank_scores[i-1]:.4f}")
+                                metadata_section = doc.metadata.get("metadata_section", "unknown")
+                                st.caption(f"Metadata Section: {metadata_section}")
                     
                     # Display answer
                     answer = result.get("generation", "No answer generated.")
@@ -140,8 +168,11 @@ def main():
                         "role": "assistant",
                         "content": answer,
                         "query_type": query_type,
+                        "confidence_level": confidence_level,
                         "retrieved_chunks": [doc.page_content for doc in documents],
                         "scores": scores,
+                        "rerank_scores": rerank_scores,
+                        "metadata_sections": [doc.metadata.get("metadata_section", "unknown") for doc in documents],
                         "sources": sources
                     })
                     

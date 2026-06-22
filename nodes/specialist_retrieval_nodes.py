@@ -1,7 +1,10 @@
+import os
+import pickle
 from typing import Dict, Any, List
 from langchain_core.documents import Document
 from retriever.base_retriever import BaseRetriever
 from retriever.bm25_retriever import BM25Retriever
+from utils.numeric_filter import detect_numeric_query, parse_numeric_filters, numeric_filter
 
 
 def hybrid_retrieval(
@@ -22,6 +25,32 @@ def hybrid_retrieval(
     Returns:
         List of (document, score) tuples merged and deduplicated
     """
+    # Check for numeric query and apply pandas filter first
+    if detect_numeric_query(question):
+        try:
+            # Load DataFrame for numeric filtering
+            if os.path.exists("./data/numeric_dataframe.pkl"):
+                with open("./data/numeric_dataframe.pkl", "rb") as f:
+                    dataframe = pickle.load(f)
+                
+                # Parse numeric filters from query
+                filters = parse_numeric_filters(question, metadata_section)
+                
+                # Apply numeric filter
+                numeric_results = numeric_filter(dataframe, metadata_section, filters)
+                
+                if numeric_results:
+                    # Convert numeric results to Document objects
+                    numeric_docs = [
+                        Document(page_content=row, metadata={"section": metadata_section, "source": "numeric_filter"})
+                        for row in numeric_results[:k]
+                    ]
+                    # Return with high scores to prioritize
+                    return [(doc, 1.0) for doc in numeric_docs]
+        except Exception as e:
+            # Fall back to normal retrieval if numeric filter fails
+            pass
+    
     # Filter documents by metadata section
     filtered_docs = retriever.retrieve_by_metadata(metadata_section)
     
